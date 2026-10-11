@@ -1,0 +1,14 @@
+# Ignore audio datasets and large audio files
+dataset/
+*.wav
+*.mp3
+*.m4a
+# Ignore Python virtual environments and caches
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Ignore large downloaded models/checkpoints if over 100MB
+*.safetensors
