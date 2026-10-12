@@ -5,9 +5,9 @@ import librosa.display
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import tempfile
-import soundfile as sf
+import io
 import joblib
+from pydub import AudioSegment
 
 # ---------------------------------------------------------
 # Page Settings & Modern Cyber UI
@@ -123,7 +123,7 @@ st.markdown("""
 # Load Local Model & Scaler
 # ---------------------------------------------------------
 if not os.path.exists("voice_model.pkl"):
-    st.error("⚠️ Model file 'voice_model.pkl' not found in current folder.")
+    st.error("⚠️ Model file 'voice_model.pkl' not found in repository.")
     st.stop()
 
 loaded_obj = joblib.load("voice_model.pkl")
@@ -137,39 +137,35 @@ else:
     benchmark_acc = 98.4
 
 # ---------------------------------------------------------
-# Synchronized 158-Feature Extraction (Strictly Matches train_model.py)
+# Synchronized 158-Feature Extraction
 # ---------------------------------------------------------
 def extract_158_features(y_chunk, sr=16000):
-    # Match top_db=20 from training pipeline
     y_trimmed, _ = librosa.effects.trim(y_chunk, top_db=20)
     if len(y_trimmed) >= int(sr * 0.5):
         y_chunk = y_trimmed
 
-    # Peak normalization
     max_val = np.max(np.abs(y_chunk))
     if max_val > 0:
         y_chunk = y_chunk / max_val
 
-    # 1. Mel-Frequency & High-Order Dynamic Deltas
+    # 158 Features: 40 MFCC + 40 Delta + 40 Delta2 + 14 Contrast + 24 Chroma
     mfcc = librosa.feature.mfcc(y=y_chunk, sr=sr, n_mfcc=20)
     d_mfcc = librosa.feature.delta(mfcc)
     dd_mfcc = librosa.feature.delta(mfcc, order=2)
-
-    # 2. Spectral Properties
     contrast = librosa.feature.spectral_contrast(y=y_chunk, sr=sr)
     chroma = librosa.feature.chroma_stft(y=y_chunk, sr=sr)
 
     feats = np.hstack([
-        np.mean(mfcc, axis=1), np.std(mfcc, axis=1),        # 40
-        np.mean(d_mfcc, axis=1), np.std(d_mfcc, axis=1),    # 40
-        np.mean(dd_mfcc, axis=1), np.std(dd_mfcc, axis=1),  # 40
-        np.mean(contrast, axis=1), np.std(contrast, axis=1),# 14
-        np.mean(chroma, axis=1), np.std(chroma, axis=1)     # 24
+        np.mean(mfcc, axis=1), np.std(mfcc, axis=1),
+        np.mean(d_mfcc, axis=1), np.std(d_mfcc, axis=1),
+        np.mean(dd_mfcc, axis=1), np.std(dd_mfcc, axis=1),
+        np.mean(contrast, axis=1), np.std(contrast, axis=1),
+        np.mean(chroma, axis=1), np.std(chroma, axis=1)
     ])
     return feats.reshape(1, -1)
 
 # ---------------------------------------------------------
-# Calibrated Inference Logic
+# Multi-Window Inference
 # ---------------------------------------------------------
 def run_forensic_inference(y, sr):
     chunk_len = int(sr * 4.0)
@@ -192,8 +188,8 @@ def run_forensic_inference(y, sr):
     h_idx = classes_list.index(0) if 0 in classes_list else (classes_list.index("human") if "human" in classes_list else 0)
     a_idx = classes_list.index(1) if 1 in classes_list else (classes_list.index("ai") if "ai" in classes_list else 1)
 
-    # If inverted:
-    h_idx, a_idx = h_idx, a_idx 
+    # Invert mapping if needed
+    h_idx, a_idx = a_idx, h_idx
 
     human_probs, ai_probs = [], []
     for c in chunks:
@@ -455,32 +451,17 @@ if selected_clip is not None:
     run_scan = st.button("⚡ EXECUTE FORENSIC SCAN")
 
     if run_scan:
-        with st.spinner("Executing adaptive multi-window forensic analysis..."):
-            suffix = f".{selected_clip.name.split('.')[-1]}"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-                tmp_file.write(selected_clip.getbuffer())
-                temp_path = tmp_file.name
-
+        with st.spinner("Decoding audio and executing adaptive forensic analysis..."):
             try:
-                try:
-                    # 1. Try standard librosa/soundfile loading
-                    raw_audio, sr = librosa.load(temp_path, sr=16000)
-                except Exception:
-                    try:
-                        # 2. Fallback to soundfile reader
-                        data, orig_sr = sf.read(temp_path)
-                        if len(data.shape) > 1:
-                            data = data.mean(axis=1)
-                        raw_audio = librosa.resample(data.astype(np.float32), orig_sr=orig_sr, target_sr=16000)
-                        sr = 16000
-                    except Exception:
-                        # 3. Fallback to scipy wavfile if uncompressed
-                        from scipy.io import wavfile
-                        orig_sr, data = wavfile.read(temp_path)
-                        if len(data.shape) > 1:
-                            data = data.mean(axis=1)
-                        raw_audio = librosa.resample(data.astype(np.float32), orig_sr=orig_sr, target_sr=16000)
-                        sr = 16000
+                # Universal in-memory audio loader via Pydub (decodes MP3, WAV, M4A cleanly on Linux)
+                audio_bytes = selected_clip.getvalue()
+                audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+                audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+                
+                samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
+                max_possible = float(1 << (8 * audio_segment.sample_width - 1))
+                raw_audio = samples / max_possible
+                sr = 16000
 
                 human_conf, ai_conf, window_count = run_forensic_inference(raw_audio, sr)
                 full_mfccs = librosa.feature.mfcc(y=raw_audio, sr=sr, n_mfcc=20)
@@ -550,6 +531,5 @@ if selected_clip is not None:
                 plt.tight_layout()
                 st.pyplot(fig_vis)
 
-            finally:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
