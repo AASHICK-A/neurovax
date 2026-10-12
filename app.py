@@ -193,7 +193,7 @@ def run_forensic_inference(y, sr):
     a_idx = classes_list.index(1) if 1 in classes_list else (classes_list.index("ai") if "ai" in classes_list else 1)
 
     # If inverted:
-    h_idx, a_idx = a_idx, h_idx 
+    h_idx, a_idx = h_idx, a_idx 
 
     human_probs, ai_probs = [], []
     for c in chunks:
@@ -463,13 +463,24 @@ if selected_clip is not None:
 
             try:
                 try:
+                    # 1. Try standard librosa/soundfile loading
                     raw_audio, sr = librosa.load(temp_path, sr=16000)
                 except Exception:
-                    data, orig_sr = sf.read(temp_path)
-                    if len(data.shape) > 1:
-                        data = data.mean(axis=1)
-                    raw_audio = librosa.resample(data, orig_sr=orig_sr, target_sr=16000)
-                    sr = 16000
+                    try:
+                        # 2. Fallback to soundfile reader
+                        data, orig_sr = sf.read(temp_path)
+                        if len(data.shape) > 1:
+                            data = data.mean(axis=1)
+                        raw_audio = librosa.resample(data.astype(np.float32), orig_sr=orig_sr, target_sr=16000)
+                        sr = 16000
+                    except Exception:
+                        # 3. Fallback to scipy wavfile if uncompressed
+                        from scipy.io import wavfile
+                        orig_sr, data = wavfile.read(temp_path)
+                        if len(data.shape) > 1:
+                            data = data.mean(axis=1)
+                        raw_audio = librosa.resample(data.astype(np.float32), orig_sr=orig_sr, target_sr=16000)
+                        sr = 16000
 
                 human_conf, ai_conf, window_count = run_forensic_inference(raw_audio, sr)
                 full_mfccs = librosa.feature.mfcc(y=raw_audio, sr=sr, n_mfcc=20)
