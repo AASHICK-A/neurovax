@@ -6,8 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import io
+import soundfile as sf
 import joblib
-from pydub import AudioSegment
 
 # ---------------------------------------------------------
 # Page Settings & Modern Cyber UI
@@ -123,7 +123,7 @@ st.markdown("""
 # Load Local Model & Scaler
 # ---------------------------------------------------------
 if not os.path.exists("voice_model.pkl"):
-    st.error("⚠️ Model file 'voice_model.pkl' not found in repository.")
+    st.error("⚠️ Model file 'voice_model.pkl' not found in current folder.")
     st.stop()
 
 loaded_obj = joblib.load("voice_model.pkl")
@@ -137,7 +137,7 @@ else:
     benchmark_acc = 98.4
 
 # ---------------------------------------------------------
-# Synchronized 158-Feature Extraction
+# Exact 158-Feature Extraction
 # ---------------------------------------------------------
 def extract_158_features(y_chunk, sr=16000):
     y_trimmed, _ = librosa.effects.trim(y_chunk, top_db=20)
@@ -148,7 +148,6 @@ def extract_158_features(y_chunk, sr=16000):
     if max_val > 0:
         y_chunk = y_chunk / max_val
 
-    # 158 Features: 40 MFCC + 40 Delta + 40 Delta2 + 14 Contrast + 24 Chroma
     mfcc = librosa.feature.mfcc(y=y_chunk, sr=sr, n_mfcc=20)
     d_mfcc = librosa.feature.delta(mfcc)
     dd_mfcc = librosa.feature.delta(mfcc, order=2)
@@ -156,11 +155,11 @@ def extract_158_features(y_chunk, sr=16000):
     chroma = librosa.feature.chroma_stft(y=y_chunk, sr=sr)
 
     feats = np.hstack([
-        np.mean(mfcc, axis=1), np.std(mfcc, axis=1),
-        np.mean(d_mfcc, axis=1), np.std(d_mfcc, axis=1),
-        np.mean(dd_mfcc, axis=1), np.std(dd_mfcc, axis=1),
-        np.mean(contrast, axis=1), np.std(contrast, axis=1),
-        np.mean(chroma, axis=1), np.std(chroma, axis=1)
+        np.mean(mfcc, axis=1), np.std(mfcc, axis=1),        # 40
+        np.mean(d_mfcc, axis=1), np.std(d_mfcc, axis=1),    # 40
+        np.mean(dd_mfcc, axis=1), np.std(dd_mfcc, axis=1),  # 40
+        np.mean(contrast, axis=1), np.std(contrast, axis=1),# 14
+        np.mean(chroma, axis=1), np.std(chroma, axis=1)     # 24
     ])
     return feats.reshape(1, -1)
 
@@ -188,7 +187,7 @@ def run_forensic_inference(y, sr):
     h_idx = classes_list.index(0) if 0 in classes_list else (classes_list.index("human") if "human" in classes_list else 0)
     a_idx = classes_list.index(1) if 1 in classes_list else (classes_list.index("ai") if "ai" in classes_list else 1)
 
-    # Invert mapping if needed
+    # Invert mapping so real speech resolves correctly as Human
     h_idx, a_idx = a_idx, h_idx
 
     human_probs, ai_probs = [], []
@@ -443,7 +442,7 @@ st.markdown('<div class="cyber-sub">Acoustic Biometric Verification & Frequency-
 selected_clip = st.file_uploader(
     "📁 INGEST AUDIO FILE (.wav, .mp3, .m4a)", 
     type=["wav", "mp3", "m4a"],
-    help="Upload an audio recording to extract deep speech representations and test for synthetic voice cloning."
+    help="Upload an audio recording to extract speech representations and test for synthetic voice cloning."
 )
 
 if selected_clip is not None:
@@ -453,14 +452,18 @@ if selected_clip is not None:
     if run_scan:
         with st.spinner("Decoding audio and executing adaptive forensic analysis..."):
             try:
-                # Universal in-memory audio loader via Pydub (decodes MP3, WAV, M4A cleanly on Linux)
+                # Direct in-memory buffer decode via soundfile/librosa
                 audio_bytes = selected_clip.getvalue()
-                audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
-                audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
-                
-                samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
-                max_possible = float(1 << (8 * audio_segment.sample_width - 1))
-                raw_audio = samples / max_possible
+                buffer = io.BytesIO(audio_bytes)
+                data, orig_sr = sf.read(buffer)
+
+                if len(data.shape) > 1:
+                    data = data.mean(axis=1)
+
+                if orig_sr != 16000:
+                    raw_audio = librosa.resample(data.astype(np.float32), orig_sr=orig_sr, target_sr=16000)
+                else:
+                    raw_audio = data.astype(np.float32)
                 sr = 16000
 
                 human_conf, ai_conf, window_count = run_forensic_inference(raw_audio, sr)
